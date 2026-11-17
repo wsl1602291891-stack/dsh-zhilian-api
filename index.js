@@ -28,8 +28,19 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { createServer } from 'node:http'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 export const name = 'dsh-zhilian-api'
+
+/** Plugin version, read from package.json so diagnostics never drift from it. */
+const VERSION = (() => {
+  try {
+    const file = fileURLToPath(new URL('./package.json', import.meta.url))
+    return String(JSON.parse(readFileSync(file, 'utf8')).version ?? 'unknown')
+  } catch {
+    return 'unknown'
+  }
+})()
 
 /** The harness web server is the only hard dependency; credentials are probed. */
 export const inject = ['webServer']
@@ -171,18 +182,6 @@ async function readJsonBody(req, limitBytes = 256 * 1024) {
   const text = Buffer.concat(chunks).toString('utf8')
   if (text.trim() === '') return {}
   return JSON.parse(text)
-}
-
-/** Validate a loopback origin such as `http://127.0.0.1:8571`. */
-function loopbackOrigin(value) {
-  try {
-    const url = new URL(String(value))
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
-    if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) return null
-    return url.origin
-  } catch {
-    return null
-  }
 }
 
 /** Open one URL in the system browser. */
@@ -447,8 +446,14 @@ export function apply(ctx) {
   let settings = readSettings()
   /** `{accessToken, user, groups, at}` — memory only. */
   let session = null
-  /** Pending authorization hand-offs: state → `{origin, at}`. */
+  /** Pending authorization hand-offs: state → `{at, used}`. */
   const pending = new Map()
+  /**
+   * Finished hand-offs: state → `{at, ok, error}`. The settings page asks about
+   * its own state, so an older session still held in memory can never be
+   * mistaken for the browser round-trip it is waiting on.
+   */
+  const finished = new Map()
   /** `/api/pricing` snapshot plus the public group metadata. */
   let catalogCache = { at: 0, rows: [], usableGroup: {}, groupRatio: {} }
   /** `/api/status` money metadata. */
@@ -458,11 +463,10 @@ export function apply(ctx) {
   try {
     const dir = dirname(settingsFile())
     mkdirSync(dir, { recursive: true })
-    writeFileSync(join(dir, 'boot.json'), `${JSON.stringify({ at: new Date().toISOString(), version: '1.0.0', pid: process.pid })}\n`)
+    writeFileSync(join(dir, 'boot.json'), `${JSON.stringify({ at: new Date().toISOString(), version: VERSION, pid: process.pid })}\n`)
   } catch {
     /* diagnostics only */
   }
-
 
   const refreshMoney = async () => {
     try {
@@ -483,7 +487,16 @@ export function apply(ctx) {
   }
 
   const refreshCatalog = async (token) => {
-    const response = await siteApi('/api/pricing', token === undefined ? {} : { token })
+    let response
+    try {
+      response = await siteApi('/api/pricing', token === undefined ? {} : { token })
+    } catch (error) {
+      // An expired access token must not take the public catalog down with it:
+      // forget the session and read the anonymous list instead.
+      if (token === undefined || error?.status !== 401) throw error
+      if (session !== null && session.accessToken === token) session = null
+      response = await siteApi('/api/pricing')
+    }
     catalogCache = {
       at: Date.now(),
       rows: Array.isArray(response.data) ? response.data : [],
@@ -644,6 +657,9 @@ p{margin:6px 0;color:#b9b9bf}
   function fail(message) {
     mark.textContent = '⚠️'; mark.className = 'err'; title.textContent = '授权未完成'; detail.textContent = message;
   }
+  // The token travels in the fragment; drop it from the address bar and the
+  // history entry as soon as it has been read.
+  try { history.replaceState(null, '', location.pathname + '?state=' + encodeURIComponent(state)); } catch (_) {}
   if (!state || !token) { fail('缺少授权参数，请回到 DeepSeek Harness 设置页重新发起授权。'); return; }
   fetch('/auth/exchange', {
     method: 'POST',
@@ -663,25 +679,46 @@ p{margin:6px 0;color:#b9b9bf}
 
   /** One authorization exchange; the state is single-use. */
   const exchangeToken = async (state, token) => {
-    const record = pending.get(state)
-    if (record === undefined || Date.now() - record.at > STATE_TTL_MS) {
+    const record = typeof state === 'string' ? pending.get(state) : undefined
+    if (record === undefined || record.used || Date.now() - record.at > STATE_TTL_MS) {
       return { ok: false, error: '授权已过期，请重新发起' }
     }
-    // Single use: a replay must not re-run the exchange.
-    pending.delete(state)
+    // Single use: a replay must not re-run the exchange. The record stays until
+    // the outcome is known so the page polling this state sees "in progress".
+    record.used = true
+    const settle = (result) => {
+      pending.delete(state)
+      finished.set(state, { at: Date.now(), ok: result.ok, error: result.ok ? undefined : result.error })
+      return result
+    }
     const accessToken = typeof token === 'string' ? token.trim() : ''
-    if (accessToken === '') return { ok: false, error: '授权信息为空' }
+    if (accessToken === '') return settle({ ok: false, error: '授权信息为空' })
     try {
       await loadAccount(accessToken)
-      return { ok: true, user: publicUser() }
+      return settle({ ok: true, user: publicUser() })
     } catch (error) {
-      return {
+      return settle({
         ok: false,
         error: error?.status === 401
           ? '登录已过期，请先在网站登录后重新授权'
           : String(error?.message ?? error)
-      }
+      })
     }
+  }
+
+  /** Where one authorization attempt stands: pending, done, failed or unknown. */
+  const authStatusFor = (state) => {
+    const done = finished.get(state)
+    if (done !== undefined) {
+      return done.ok
+        ? { ok: true, authorized: true, user: publicUser() }
+        : { ok: true, authorized: false, failed: true, error: done.error }
+    }
+    const record = pending.get(state)
+    if (record !== undefined && Date.now() - record.at <= STATE_TTL_MS) {
+      return { ok: true, authorized: false, waiting: true }
+    }
+    return { ok: true, authorized: false, failed: true, error: '授权已过期，请重新发起' }
   }
 
   /**
@@ -701,18 +738,19 @@ p{margin:6px 0;color:#b9b9bf}
     const port = await authPortReady
     if (port === null) throw new Error('本机授权回调端口未就绪')
     const state = randomBytes(24).toString('base64url')
-    pending.set(state, { at: Date.now() })
+    pending.set(state, { at: Date.now(), used: false })
     for (const [key, value] of pending) {
       if (Date.now() - value.at > STATE_TTL_MS) pending.delete(key)
     }
-    const callback = `http://127.0.0.1:${port}/auth/handoff`
+    for (const [key, value] of finished) {
+      if (Date.now() - value.at > STATE_TTL_MS) finished.delete(key)
+    }
     return {
       state,
       // WAF rule: a callback URL in the query string is read as URL-in-URL and
       // answered 403. Only the port travels; the page rebuilds the loopback
       // callback itself.
-      url: `${SITE}/dsh/?state=${encodeURIComponent(state)}&port=${port}`,
-      callback
+      url: `${SITE}/dsh/?state=${encodeURIComponent(state)}&port=${port}`
     }
   }
 
@@ -843,26 +881,23 @@ p{margin:6px 0;color:#b9b9bf}
 
       // ── authorization ───────────────────────────────────────────────────
       if (route === '/auth/status' && req.method === 'GET') {
+        // With a state, answer for that one browser round-trip only: a session
+        // already in memory must not complete a fresh re-authorization.
+        const state = url.searchParams.get('state')
+        if (state !== null && state !== '') {
+          sendJson(res, 200, authStatusFor(state))
+          return
+        }
         sendJson(res, 200, { ok: true, authorized: session !== null, user: publicUser() })
         return
       }
 
       if (route === '/auth/start' && req.method === 'POST') {
-        // The browser callback lives on the plugin's own loopback listener, so
-        // no renderer origin is needed (or trusted) here.
+        // The browser callback lives on the plugin's own loopback listener (the
+        // hand-off page and the token exchange are served there), so no
+        // renderer origin is needed or trusted here.
         await readJsonBody(req)
         sendJson(res, 200, { ok: true, ...(await startAuth()) })
-        return
-      }
-
-      if (route === '/auth/handoff' && req.method === 'GET') {
-        sendHtml(res, 200, handoffHtml())
-        return
-      }
-
-      if (route === '/auth/exchange' && req.method === 'POST') {
-        const body = await readJsonBody(req)
-        sendJson(res, 200, await exchangeToken(body.state, body.token))
         return
       }
 
@@ -891,6 +926,11 @@ p{margin:6px 0;color:#b9b9bf}
         const credentials = await credentialService()
 
         await ensureCatalog()
+        if (session === null) {
+          // The catalog read found the access token rejected and dropped it.
+          sendJson(res, 401, { ok: false, needAuth: true, error: '授权已过期，请重新一键授权' })
+          return
+        }
         const allTokens = await listTokens(session.accessToken)
         const connected = []
         const skipped = []
@@ -916,6 +956,32 @@ p{margin:6px 0;color:#b9b9bf}
           } catch (error) {
             skipped.push({ group, reason: String(error?.message ?? error) })
           }
+        }
+
+        // Diagnostic trail for the settings page: never contains a key, only
+        // which group failed and the site/plugin's own message.
+        const writeTrail = (removedGroups) => {
+          try {
+            const dir = dirname(settingsFile())
+            mkdirSync(dir, { recursive: true })
+            writeFileSync(
+              join(dir, 'last-connect.json'),
+              `${JSON.stringify({ at: new Date().toISOString(), requested: groups, connected, skipped, removed: removedGroups }, null, 2)}\n`
+            )
+          } catch {
+            /* diagnostics only */
+          }
+        }
+
+        // Nothing connected: change nothing. Removal below deletes remote tokens
+        // and stored keys, so it only runs once at least one requested group has
+        // a working replacement. Refs allocated for the failed groups are dropped
+        // by re-reading the settings that were last persisted.
+        if (connected.length === 0) {
+          settings = readSettings()
+          writeTrail([])
+          sendJson(res, 400, { ok: false, error: '没有任何分组接入成功', skipped })
+          return
         }
 
         // Groups connected before but not picked this time are removed: the
@@ -945,23 +1011,7 @@ p{margin:6px 0;color:#b9b9bf}
           removed.push(group)
         }
 
-        // Diagnostic trail for the settings page: never contains a key, only
-        // which group failed and the site/plugin's own message.
-        try {
-          const dir = dirname(settingsFile())
-          mkdirSync(dir, { recursive: true })
-          writeFileSync(
-            join(dir, 'last-connect.json'),
-            `${JSON.stringify({ at: new Date().toISOString(), requested: groups, connected, skipped, removed }, null, 2)}\n`
-          )
-        } catch {
-          /* diagnostics only */
-        }
-
-        if (connected.length === 0) {
-          sendJson(res, 400, { ok: false, error: '没有任何分组接入成功', skipped })
-          return
-        }
+        writeTrail(removed)
 
         settings.selection = connected.map(item => item.group)
         for (const [group, value] of Object.entries(fresh)) {
@@ -1011,16 +1061,24 @@ p{margin:6px 0;color:#b9b9bf}
 
       // ── refresh catalog / balance ───────────────────────────────────────
       if (route === '/refresh' && req.method === 'POST') {
-        await refreshCatalog(session?.accessToken)
-        await refreshMoney()
+        let warning
         if (session !== null) {
           try {
             await loadAccount(session.accessToken)
-          } catch {
-            session = null
+          } catch (error) {
+            // Only a rejected token ends the session; a timeout or a 5xx is
+            // transient and the next refresh may well succeed.
+            if (error?.status === 401) {
+              session = null
+              warning = '授权已过期，请重新点「一键授权」'
+            } else {
+              warning = `账户信息刷新失败：${String(error?.message ?? error)}`
+            }
           }
         }
-        sendJson(res, 200, { ok: true, state: stateSnapshot() })
+        if (session === null) await refreshCatalog()
+        await refreshMoney()
+        sendJson(res, 200, { ok: true, warning, state: stateSnapshot() })
         return
       }
 
@@ -1090,8 +1148,6 @@ export const _internal = {
   catalogFor,
   buildProviders,
   defaultSettings,
-  loopbackOrigin,
   listTokens,
   ensureToken
 }
-// host build: 1794911217

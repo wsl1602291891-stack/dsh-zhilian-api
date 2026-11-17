@@ -114,6 +114,9 @@ window.__ModuleLoader__.load({
       pendingAuth: false,
       autoConnect: false,
       authUrl: null,
+      // The state of the browser round-trip being waited on; status is asked
+      // about this state only, never about "is any session in memory".
+      authState: null,
       authStartedAt: 0,
       // Success summary shown after an import; closes itself after 3 seconds.
       modal: null,
@@ -146,23 +149,72 @@ window.__ModuleLoader__.load({
       return { status: response.status, ...value }
     }
 
+    /**
+     * Fold a freshly built provider profile into what the user already has.
+     * The site decides which models exist and how the route talks; everything
+     * the user may have edited on the Models page (image input, thinking
+     * levels, window sizes, compat switches) survives for models that were
+     * already there. Only models new to the route get the plugin's defaults.
+     * @param existing - the stored profile for this route id, if any.
+     * @param profile - the profile built from the site catalog.
+     * @returns the profile to write.
+     */
+    function mergeProfile(existing, profile) {
+      if (existing === null || typeof existing !== 'object' || Array.isArray(existing)) return profile
+      const known = new Map()
+      for (const model of Array.isArray(existing.models) ? existing.models : []) {
+        if (model !== null && typeof model === 'object' && typeof model.id === 'string') known.set(model.id, model)
+      }
+      return {
+        ...existing,
+        displayName: profile.displayName,
+        apiKeyEnv: profile.apiKeyEnv,
+        api: profile.api,
+        baseURL: profile.baseURL,
+        models: profile.models.map(model => (known.has(model.id) ? { ...known.get(model.id), id: model.id } : model))
+      }
+    }
+
+    /** The user's current `llm-pi-ai` section: `{ providers, revision }`, or empty if unreadable. */
+    async function readPiAi(settings) {
+      try {
+        if (typeof settings.describe !== 'function') return { providers: {}, revision: undefined }
+        const response = await settings.describe()
+        if (response?.ok !== true) return { providers: {}, revision: undefined }
+        const view = (response.value?.namespaces || []).find(item => item.ns === NS)
+        const providers = view?.user?.providers
+        return {
+          providers: providers !== null && typeof providers === 'object' && !Array.isArray(providers) ? providers : {},
+          revision: typeof view?.revision === 'number' ? view.revision : undefined
+        }
+      } catch {
+        return { providers: {}, revision: undefined }
+      }
+    }
+
     /** Apply one connect result to the llm-pi-ai settings namespace. */
     async function writeProviders(runtime, result) {
-      const ops = []
-      for (const id of result.staleRoutes || []) ops.push({ op: 'unset', path: ['providers', id] })
-      for (const [id, profile] of Object.entries(result.providers || {})) {
-        ops.push({ op: 'set', path: ['providers', id], value: profile })
-      }
-      if (ops.length === 0) return
+      if ((result.staleRoutes || []).length === 0 && Object.keys(result.providers || {}).length === 0) return
       const settings = runtime.ctx.remote?.settings
       if (settings === undefined || typeof settings.mutate !== 'function') {
         throw new Error('DSH 设置服务不可用，无法写入模型路由')
       }
-      // The third argument is the revision fence; undefined writes unfenced,
-      // which is how the Models page writes too when it holds no revision.
-      const response = await settings.mutate(NS, ops, undefined)
-      if (response?.ok !== true) {
-        throw new Error(response?.error?.message || '写入模型路由被拒绝')
+      // Read, merge, write against the revision that was read; one conflict
+      // (the user saved on the Models page in between) is retried from a fresh
+      // read rather than overwriting their change.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const current = await readPiAi(settings)
+        const ops = []
+        for (const id of result.staleRoutes || []) ops.push({ op: 'unset', path: ['providers', id] })
+        for (const [id, profile] of Object.entries(result.providers || {})) {
+          ops.push({ op: 'set', path: ['providers', id], value: mergeProfile(current.providers[id], profile) })
+        }
+        const response = await settings.mutate(NS, ops, current.revision)
+        if (response?.ok === true) return
+        const conflict = response?.error?.code === 'settings/conflict'
+        if (!conflict || attempt === 1) {
+          throw new Error(response?.error?.message || '写入模型路由被拒绝')
+        }
       }
     }
 
@@ -204,7 +256,13 @@ window.__ModuleLoader__.load({
           body: '{}'
         })
         if (started.ok !== true) throw new Error(started.error || '无法发起授权')
-        store.set({ pendingAuth: true, autoConnect, authUrl: started.url, authStartedAt: Date.now() })
+        store.set({
+          pendingAuth: true,
+          autoConnect,
+          authUrl: started.url,
+          authState: started.state || null,
+          authStartedAt: Date.now()
+        })
         const opened = await call('/open', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -279,6 +337,7 @@ window.__ModuleLoader__.load({
     function useAuthPolling(runtime) {
       const pendingAuth = useSyncExternalStore(store.subscribe, () => snapshot.pendingAuth)
       const autoConnect = useSyncExternalStore(store.subscribe, () => snapshot.autoConnect)
+      const authState = useSyncExternalStore(store.subscribe, () => snapshot.authState)
       const selection = useSyncExternalStore(store.subscribe, () => snapshot.selection)
       useEffect(() => {
         if (!pendingAuth) return undefined
@@ -288,14 +347,26 @@ window.__ModuleLoader__.load({
             store.set({
               pendingAuth: false,
               autoConnect: false,
+              authState: null,
               notice: { kind: 'error', text: '授权等待已超时，请重新点「一键授权」。' }
             })
             return
           }
           try {
-            const status = await call('/auth/status')
-            if (cancelled || status.ok !== true || status.authorized !== true) return
-            store.set({ pendingAuth: false, autoConnect: false })
+            const query = authState ? `?state=${encodeURIComponent(authState)}` : ''
+            const status = await call(`/auth/status${query}`)
+            if (cancelled) return
+            if (status.failed === true) {
+              store.set({
+                pendingAuth: false,
+                autoConnect: false,
+                authState: null,
+                notice: { kind: 'error', text: status.error || '授权未完成，请重新点「一键授权」。' }
+              })
+              return
+            }
+            if (status.ok !== true || status.authorized !== true) return
+            store.set({ pendingAuth: false, autoConnect: false, authState: null })
             await reload()
             if (autoConnect) {
               const groups = snapshot.selection.length > 0 ? snapshot.selection : selection
@@ -309,7 +380,7 @@ window.__ModuleLoader__.load({
           cancelled = true
           clearInterval(timer)
         }
-      }, [pendingAuth, autoConnect, selection, runtime])
+      }, [pendingAuth, autoConnect, authState, selection, runtime])
     }
 
     /** Format a NewAPI quota as USD (the site's 500k quota = $1 unit). */
@@ -440,8 +511,9 @@ window.__ModuleLoader__.load({
                 style: S.button,
                 disabled: state.busy !== null,
                 onClick: async () => {
-                  await call('/refresh', { method: 'POST' })
+                  const refreshed = await call('/refresh', { method: 'POST' })
                   await reload()
+                  if (refreshed.warning) store.set({ notice: { kind: 'error', text: refreshed.warning } })
                 }
               },
               '刷新目录'
@@ -544,7 +616,7 @@ window.__ModuleLoader__.load({
                     {
                       type: 'button',
                       style: S.button,
-                      onClick: () => store.set({ pendingAuth: false, autoConnect: false, authUrl: null })
+                      onClick: () => store.set({ pendingAuth: false, autoConnect: false, authUrl: null, authState: null })
                     },
                     '取消等待'
                   )
@@ -821,6 +893,8 @@ window.__ModuleLoader__.load({
     }
 
     return {
+      /** Pure helpers, exported for the plugin's own tests. */
+      _internal: { mergeProfile },
       inject: ['slots', 'remote', 'remote.settings'],
       apply(ctx) {
         const runtime = { ctx }
