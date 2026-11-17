@@ -1,7 +1,6 @@
 {
   "name": "dsh-zhilian-api",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
   "description": "One-click NewAPI access for DeepSeek Harness: authorize on your own site, mint per-group keys, and register protocol-correct provider routes (GPT→responses, Claude→messages, others→chat).",
   "meta": {
@@ -36,5 +35,6 @@
         "@deepseek-ai/dsh-api-remotes"
       ]
     }
-  }
+  },
+  "license": "Apache-2.0"
 }

@@ -37,3 +37,7 @@
 
 - 插件：从 `bundles` 移除 `dsh-zhilian-api`，删符号链接，重启 DSH；设置页与路由消失，已建 Key 仍在本站令牌列表里可手动删除。
 - 站点：删 `/www/wwwroot/api.888425.xyz/dsh/` 与 vhost 的 `DSH AUTHORIZE` 块，`nginx -t && systemctl reload nginx`。
+
+## 许可
+
+Apache License 2.0，见 [LICENSE](LICENSE)。
