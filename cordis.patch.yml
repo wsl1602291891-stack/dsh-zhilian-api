@@ -1,0 +1,7 @@
+# Registers the 智连API settings section and its host API. The host half
+# owns the one-click authorization exchange, per-group key minting and model
+# catalog; the client half draws the settings page and writes the
+# llm-pi-ai provider routes. Remove this bundle to take the section away.
+- insert:
+    - id: zhilian-api
+      name: dsh-zhilian-api

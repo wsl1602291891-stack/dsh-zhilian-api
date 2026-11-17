@@ -1,0 +1,40 @@
+{
+  "name": "dsh-zhilian-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "One-click NewAPI access for DeepSeek Harness: authorize on your own site, mint per-group keys, and register protocol-correct provider routes (GPT→responses, Claude→messages, others→chat).",
+  "meta": {
+    "title": "智连API",
+    "description": "设置页新增「智连API」：一键授权本站账号、按分组创建/复用 Key、自动按模型家族选择 Responses/Messages/Chat 协议，并在页底提供充值、生图站、视频站等入口。"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.18.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
+    }
+  }
+}
