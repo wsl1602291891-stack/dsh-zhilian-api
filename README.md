@@ -28,7 +28,12 @@
        - id: zhilian-api
          name: dsh-zhilian-api
    ```
-4. 重启 DSH，设置 → 智连API。
+4. 在 `~/.dsh/profiles/<profile>/package.json` 的 `dependencies` 里登记本插件，让 dsh-market 的「已安装」列表也能看到它：
+   ```json
+   "dsh-zhilian-api": "link:C:/Users/<用户名>/.dsh/local-plugins/dsh-zhilian-api"
+   ```
+   dsh-market 的「已安装」读的是 profile `package.json` 的 `dependencies`，只建符号链接不会出现在列表里。锁文件会在下一次 `pnpm install` 时自动补上这一条。
+5. 重启 DSH，设置 → 智连API。
 
 ## 使用前提
 
