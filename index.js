@@ -8,7 +8,7 @@
  *      site's `/dsh/` page, which reads the site's HttpOnly refresh cookie,
  *      redirects back to a loopback handoff page, and posts the short-lived
  *      access token here (`/auth/exchange`) — the token never touches disk;
- *   2. per-group key minting — one named token per enabled NewAPI group,
+ *   2. per-group key minting — one named token per enabled site group,
  *      reusing an existing token and updating its model scope in place
  *      (a `PUT` is a whole-record replace, so every other field is refilled);
  *   3. the model catalog — `/api/pricing` filtered to text models, split by
@@ -198,7 +198,7 @@ function openExternal(url) {
   child.unref()
 }
 
-// ── NewAPI requests ─────────────────────────────────────────────────────────
+// ── site API requests ────────────────────────────────────────────────────────
 
 /** One JSON request against the site; throws with the site's own message. */
 async function siteApi(path, options = {}) {
@@ -335,7 +335,7 @@ async function ensureToken(accessToken, group, modelNames, allTokens) {
 
 // ── model catalog ───────────────────────────────────────────────────────────
 
-/** Video names that NewAPI sometimes exposes as chat endpoints. */
+/** Video names the site sometimes exposes as chat endpoints. */
 const VIDEO_WORDS = /video|sora|veo|kling|hailuo|seedance|pika|runway|luma|wan3/
 /** Media names that must never enter the chat catalog. */
 const MEDIA_WORDS = /audio|tts|speech|voice|music|sound|whisper|image|dall-e|dalle|imagen|flux|sdxl|stable-diffusion|midjourney|seedream|qwen-image/

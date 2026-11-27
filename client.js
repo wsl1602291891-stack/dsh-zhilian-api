@@ -383,7 +383,7 @@ window.__ModuleLoader__.load({
       }, [pendingAuth, autoConnect, authState, selection, runtime])
     }
 
-    /** Format a NewAPI quota as USD (the site's 500k quota = $1 unit). */
+    /** Format the site's quota as USD (500k quota = $1 unit). */
     function money(quota, meta) {
       if (typeof quota !== 'number' || !Number.isFinite(quota)) return '—'
       const perUnit = Number(meta?.quotaPerUnit) || 500000

@@ -1,12 +1,12 @@
 {
   "name": "dsh-zhilian-api",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
-  "description": "One-click NewAPI access for DeepSeek Harness: authorize on your own site, mint per-group keys, and register protocol-correct provider routes (GPT→responses, Claude→messages, others→chat).",
+  "description": "One-click site authorization for DeepSeek Harness: authorize your zhilian account, mint per-group keys, and register protocol-correct provider routes (GPT-style to responses, Claude-style to messages, others to chat).",
   "meta": {
     "title": "智连API",
-    "description": "设置页新增「智连API」：一键授权本站账号、按分组创建/复用 Key、自动按模型家族选择 Responses/Messages/Chat 协议，并在页底提供充值、生图站、视频站等入口。"
+    "description": "设置页新增「智连API」：一键授权网站账号、按分组创建/复用专用 Key、无需手动创建 Key，自动按模型家族选择对应协议（Responses / Messages / Chat），页底提供充值与生图、视频等工具入口。"
   },
   "exports": {
     ".": "./index.js",
@@ -37,5 +37,17 @@
       ]
     }
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "deepseek",
+    "llm-gateway",
+    "one-click-auth"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wsl1602291891-stack/dsh-zhilian-api.git"
+  }
 }
